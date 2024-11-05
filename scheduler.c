@@ -1,7 +1,7 @@
 #include <stdio.h>
 
 int main(int argc, char **argv[]) {
-    int[] created_pids = new int[1000];
+    int created_pids[1000];
     bool amParent = false;
 
     // CREATE CHILD PROCESSES
@@ -13,6 +13,8 @@ int main(int argc, char **argv[]) {
             for (int j = 0; j < 300000; j++) {
                 printf("Hello Professor Dent from %s", getpid());
             }
+
+            break; // Child process should not continue the loop and make its own children.
         } else if (rc > 0) { // this is parent path
             created_pids[i] = rc;
             amParent = true;
