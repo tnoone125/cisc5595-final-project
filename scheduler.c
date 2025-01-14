@@ -1,3 +1,8 @@
+// Jan C. Bierowiec
+// Thomas Noone
+// Operating Systems Final Project
+// Round Robin Scheduling Algorithm
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -8,76 +13,94 @@
 #include <string.h>
 #include "queue.h"
 
-
 // maximum processes and a context switch overhead
 #define MAX_PROCESSES 1000
-#define CONTEXT_SWITCH_OVERHEAD_MS 10
 
-
-// this array stores process IDs
+// this array stores process IDs and allows us to "key in" for stats
 int created_pids[MAX_PROCESSES];
 
+// Print more details about queuing of processes and their progress.
+bool verbose = false;
+
+// these arrays keep track of generation, response & complete times.
+// The indexes correspond to the index of created_pids for
+// accessing the actual PID.
+struct timespec process_gen_times[MAX_PROCESSES];
 struct timespec first_response_times[MAX_PROCESSES];
 struct timespec complete_times[MAX_PROCESSES];
 
 // this is a flag that is controlled by signal handler
 volatile sig_atomic_t run_process = 0;
 
-
 // Signal handler to start/resume processes
-void handle_signal(int signal) 
+void handle_sigcont(int signal)
 {
     run_process = 1;
+    if (verbose)
+        printf("PID %d received a start signal.\n", getpid());
 }
 
+void handle_sigstop(int signal)
+{
+    run_process = 0;
+    if (verbose)
+        printf("PID %d received a stop signal.\n", getpid());
+}
 
 // Function executed by each process
-void execute_process(int pid_index) 
+void execute_process()
 {
-    long calculation = 0;
+    srand48(getpid() ^ time(NULL));
+    int runs = (int)(drand48() * (50000000 - 10000 + 1)) + 10000; // Random integer between 10000 and 50000000
+    printf("Process %d started: it will sum i^2 up to i = %d.\n", getpid(), runs);
 
-
-    for (int i = 1; i <= 1000; i++) 
+    long calculation = 0L;
+    for (unsigned int i = 0; i < runs; i++)
     {
-        if (!run_process) 
+        if (!run_process)
         {
-            pause(); // Waits for the signal to resume
+            raise(SIGSTOP); // Waits for the signal to resume
         }
 
-        // calculation done by the processor
-        // I'll send you what the outputs look like
-        // Let me know if you want to change this to be a more complex calculation (Fibonacci, Brownian Motion, simple Physics Engine, etc)
         calculation += i * i;
 
-        // instead of printing everything, I figured we can print out the progress of every 100 iterations 
-        // When running the program, not everything would fit in a terminal, especailly for screenshots
-        // I figured this part would be better simplified
-        if (i % 100 == 0) 
-        { 
-            printf("Process %d: Calculation at step %d = %ld\n", getpid(), i, calculation);
+        if (i % 500000 == 0 && verbose)
+        {
+            printf("Process %d is currently at step %d.\n", getpid(), i);
         }
     }
-    
-    // added this to know when the process finished executing
-    printf("Process %d: Finished execution.\n", getpid());
+
+    printf("Process %d completed. Answer: %ld\n", getpid(), calculation);
 }
 
 
 int main(int argc, char *argv[])
 {
-    if (argc != 3) {
-        printf("Usage: %s <number_of_processes> <quanta_ms>\n", argv[0]);
+    if (argc < 3 || argc > 4) {
+        //printf("Usage: %s <number_of_processes> <quanta_ms>\n", argv[0]);
+        printf("Usage: %s <number_of_processes> <quanta_ms> [verbose]\n", argv[0]);
         return 1;
     }
 
+    int add_arg = 0;
 
-    int num_processes = atoi(argv[1]);
-    int quanta = atoi(argv[2]);
+    if (argc == 4) {
+        add_arg = 1;
+        if (strcmp(argv[1], "-v") == 0) {
+            verbose = true;
+        }
+    }
 
+    int num_processes = atoi(argv[1+add_arg]);
+    int quanta = atoi(argv[2+add_arg]);
 
     if (num_processes > MAX_PROCESSES || num_processes <= 0) {
         printf("Invalid number of processes. Max allowed is: %d\n", MAX_PROCESSES);
         return 1;
+    }
+
+    if (verbose) {
+        printf("Verbose mode enabled.\n");
     }
 
     // when these arrays were integers, this caused the turnaround time to output 0
@@ -85,10 +108,7 @@ int main(int argc, char *argv[])
     memset(first_response_times, 0, sizeof(first_response_times));
     memset(complete_times, 0, sizeof(complete_times));
 
-
-    signal(SIGUSR1, handle_signal); // signal handler
-
-    // Process Queue initialization 
+    // Process Queue initialization
     Queue processQueue;
     initializeQueue(&processQueue);
 
@@ -96,17 +116,25 @@ int main(int argc, char *argv[])
     for (int i = 0; i < num_processes; i++)
     {
         int rc = fork();
-        if (rc == 0) 
+        if (rc == 0)
         {            // ALL CHILD PROCESS CODE GOES HERE
-            pause(); // WAIT FOR SIGNAL TO START!
-            printf("Process %d started.\n", getpid());
-            execute_process(i);
+            //printf("Process %d created!\n", getpid());
+            if (verbose) {
+                printf("Process %d created!\n", getpid());
+            }
+            signal(SIGCONT, handle_sigcont);
+            signal(SIGSTOP, handle_sigstop);
+            raise(SIGSTOP); // WAIT FOR SIGNAL TO START!
+            execute_process();
             exit(0); // Child process should not continue the loop and make its own children.
         }
         else if (rc > 0)
         { // this is parent path
+            struct timespec current_time;
+            clock_gettime(CLOCK_MONOTONIC, &current_time);
+
             created_pids[i] = rc;
-            // queue_times[i] = TODO
+            process_gen_times[i] = current_time;
             enqueue(&processQueue, i);
         }
         else
@@ -116,19 +144,14 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Scheduler logic
-    // removed the if statement 
-    printf("Parent managing processes...\n");
+    //printf("Parent managing processes...\n");
+    if (verbose) {
+        printf("Parent managing processes...\n");
+    }
     while (!isEmpty(&processQueue))
     {
         int i = poll(&processQueue);
         int pid = created_pids[i];
-
-        /*
-            Changed the response time code to get the current time, as well as I added the clock
-            Earliler had clock(), but this did not output any time (all ouputs would be 0)
-            So I changed it to CLOCK_MONOTONIC -> I provided the explanation for the difference between the two
-        */
 
         // this is for getting the actual time (current time)
         struct timespec current_time;
@@ -137,60 +160,68 @@ int main(int argc, char *argv[])
         // the monotonic clock gets the precise elapsed time
         clock_gettime(CLOCK_MONOTONIC, &current_time);
 
-        // helper if-statement to check if first response time is recorded 
+        // helper if-statement to check if first response time is recorded
         if (first_response_times[i].tv_sec == 0 && first_response_times[i].tv_nsec == 0) {
             first_response_times[i] = current_time; // Record first response time
         }
 
-        kill(pid, SIGUSR1);    // Start or resume process
+        kill(pid, SIGCONT);    // Start or resume process
         // sleep() seconds
-        // usleep() milliseconds
+        // usleep() microseconds
         usleep(quanta * 1000); // Allow process to run for quanta duration
-        kill(pid, SIGSTOP);    // Preempt process
-
-        // I added this to simulate the context switch overhead
-        usleep(CONTEXT_SWITCH_OVERHEAD_MS * 1000);
 
         int status;            // Checks if the process is still running or completed
         int result = waitpid(pid, &status, WNOHANG);
-        
-        if (result == 0) 
+
+        if (result == -1)
         {
-            // If the process is still running, then it is requeued it
-            printf("Requeuing child process %d.\n", pid);
+            perror("Error fetching status of pid.\n");
+        }
+        else if (result == 0)
+        {
+            kill(pid, SIGSTOP);
             enqueue(&processQueue, i);
+            if (verbose) {
+                printf("Child process %d is still running, so it has been stopped and returned to the queue.\n", pid);
+                printf("Child process %d is still running, so it has been stopped and returned to the queue.\n", pid);
+            }
         }
-
-        // added the WIFEXITED to check if process has been completed
-        // also records the completion time
-        else if (WIFEXITED(status)) 
+        else if (WIFEXITED(status))
         {
-            // complete times array
             clock_gettime(CLOCK_MONOTONIC, &complete_times[i]);
-            printf("Child process %d completed.\n", pid);
+            if (verbose) {
+                printf("Child process %d completed, not requeueing.\n", pid);
+            }
+        }
+        else if (WIFSIGNALED(status))
+        {
+            clock_gettime(CLOCK_MONOTONIC, &complete_times[i]);
+            if (verbose) {
+                printf("Child process %d terminated with signal: %d. Not requeuing.\n", pid, WTERMSIG(status));
+            }
         }
     }
 
-    // This ensures that all the processes have finished
-    for (int i = 0; i < num_processes; i++) {
-        // printf("Letting all processes finish off...");
-        // kill(created_pids[i], SIGCONT);
-        // Wait for the child to exit
-        waitpid(created_pids[i], NULL, 0);
-    }
-
-
-    // Added the for-loop below to calculate and print metrics
-    // can technically be its own function (void) but I firgured I would add it here
     printf("\nProcess Metrics:\n");
+    long sum_response_times = 0L;
+    long sum_turnaround_times = 0L;
     for (int i = 0; i < num_processes; i++) {
-        
+        long gen_time_ms = process_gen_times[i].tv_sec * 1000 + process_gen_times[i].tv_nsec / 1000000;
         long start_time_ms = first_response_times[i].tv_sec * 1000 + first_response_times[i].tv_nsec / 1000000;
         long end_time_ms = complete_times[i].tv_sec * 1000 + complete_times[i].tv_nsec / 1000000;
-        long turnaround_time = end_time_ms - start_time_ms;
+        long turnaround_time = end_time_ms - gen_time_ms;
+        long response_time = start_time_ms - gen_time_ms;
 
-        printf("Process %d - Turnaround Time: %ld ms\n", created_pids[i], turnaround_time);
+        sum_response_times += response_time;
+        sum_turnaround_times += turnaround_time;
+        if (verbose) {
+            printf("Process %d - Response Time: %ld ms\n", created_pids[i], response_time);
+            printf("Process %d - Turnaround Time: %ld ms\n", created_pids[i], turnaround_time);
+        }
     }
+
+    printf("Average response time: %.2f ms\n", (double)sum_response_times / num_processes);
+    printf("Average turnaround time: %.2f ms\n", (double)sum_turnaround_times / num_processes);
 
     return 0;
 }
